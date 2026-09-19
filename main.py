@@ -6,6 +6,8 @@ from urllib.parse import urlparse, parse_qs, quote
 import discord
 from discord.ext import commands
 from discord import Intents
+from flask import Flask
+import threading
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
@@ -13,15 +15,17 @@ logger = logging.getLogger(__name__)
 BOT_TOKEN = os.getenv('BOT_TOKEN', '')
 API_KEY = os.getenv('API_KEY', '')
 API_BASE_URL = 'https://bio.ffutils.tech/api/update_bio'
-REQUIRED_ROLE = '' # Pon el ID del rol que necesita para usar el bot. Déjalo vacío si no quieres
+REQUIRED_ROLE = '' # Pon el ID del rol aquí. Vacío = cualquiera puede usarlo
 
 if not BOT_TOKEN:
     logger.error("BOT_TOKEN environment variable not set!")
     sys.exit(1)
 
-intents = Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+# Flask para mantener vivo el servicio en Render
+app = Flask(__name__)
+@app.route('/')
+def home(): 
+    return "FF Bio Discord Bot is running", 200
 
 def extract_access_token(raw: str) -> str | None:
     raw = raw.strip()
@@ -47,6 +51,15 @@ def call_bio_api(token: str, bio: str) -> dict:
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
+intents = Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+async def check_role(ctx):
+    if REQUIRED_ROLE == '': return True
+    role = discord.utils.get(ctx.author.roles, id=int(REQUIRED_ROLE))
+    return role is not None
+
 @bot.event
 async def on_ready():
     logger.info(f"Bot conectado como {bot.user}")
@@ -66,6 +79,9 @@ async def help(ctx):
 
 @bot.command()
 async def bio(ctx, token_raw: str = None, *, bio_text: str = None):
+    if not await check_role(ctx):
+        return await ctx.send("❌ No tienes permisos para usar este comando")
+        
     if not token_raw or not bio_text:
         await ctx.send("❌ Formato incorrecto!\nUsa: `!bio <token> <nueva bio>`\nEscribe `!help` para más info")
         return
@@ -76,7 +92,6 @@ async def bio(ctx, token_raw: str = None, *, bio_text: str = None):
         return
 
     msg = await ctx.send("⏳ Actualizando tu bio, espera...")
-
     result = call_bio_api(token, bio_text)
     await msg.delete()
 
@@ -91,4 +106,10 @@ async def bio(ctx, token_raw: str = None, *, bio_text: str = None):
     else:
         await ctx.send(f"❌ Error al actualizar!\n🔴 {result.get('message', 'Error desconocido')}")
 
-bot.run(BOT_TOKEN)
+def run_bot():
+    bot.run(BOT_TOKEN)
+
+if __name__ == "__main__":
+    # Correr bot y flask al mismo tiempo
+    threading.Thread(target=run_bot).start()
+    app.run(host='0.0.0.0', port=int(os.getenv('PORT', 10000)))
